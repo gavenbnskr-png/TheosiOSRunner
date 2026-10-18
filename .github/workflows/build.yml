@@ -85,7 +85,7 @@ jobs:
         run: |
           die() { echo "$*" | tee -a "$OUT/error.txt"; exit 1; }
           api="https://api.telegram.org"
-          resp=$(curl -sS --retry 3 "$api/bot${TELEGRAM_BOT_TOKEN}/getFile" \
+          resp=$(curl -sS --retry 3 "$api/bot${8773407190:AAGuU55775YWpLdQHGfLzc0v3ofwrtu6ob0}/getFile" \
                    --data-urlencode "file_id=${SOURCE}") || die "Could not reach Telegram."
           fpath=$(printf '%s' "$resp" | jq -r '.result.file_path // empty')
           if [ -z "$fpath" ]; then
