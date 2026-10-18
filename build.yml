@@ -1,0 +1,261 @@
+name: Theos Build
+
+# Started by the Telegram bot (workflow_dispatch). You can also run it by hand
+# from the Actions tab: pick source_type "git" and paste an https repo URL.
+run-name: "Theos build: ${{ inputs.file_name || 'manual run' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: "Telegram chat id that receives the result"
+        required: true
+        type: string
+      reply_to:
+        description: "Telegram message id to reply to (optional)"
+        required: false
+        default: ""
+        type: string
+      source_type:
+        description: "Where the project comes from"
+        required: true
+        default: git
+        type: choice
+        options:
+          - telegram
+          - git
+      source:
+        description: "Telegram file_id of a .zip, or an https git URL"
+        required: true
+        type: string
+      file_name:
+        description: "Label shown in the Telegram reply"
+        required: false
+        default: ""
+        type: string
+      branch:
+        description: "Git branch or tag (git source only)"
+        required: false
+        default: ""
+        type: string
+      options:
+        description: "Space separated: deb rootless debug"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build with Theos
+    # Change to macos-26 if you ever need a newer Xcode.
+    runs-on: macos-15
+    timeout-minutes: 30
+    # Nothing secret lives here. The bot token is only handed to the steps that
+    # talk to Telegram, never to the step that runs the project's Makefile.
+    env:
+      CHAT_ID: ${{ inputs.chat_id }}
+      REPLY_TO: ${{ inputs.reply_to }}
+      SOURCE_TYPE: ${{ inputs.source_type }}
+      SOURCE: ${{ inputs.source }}
+      FILE_NAME: ${{ inputs.file_name }}
+      BRANCH: ${{ inputs.branch }}
+      OPTIONS: ${{ inputs.options }}
+
+    steps:
+      - name: Prepare folders
+        run: |
+          mkdir -p "$HOME/tbuild/out" "$HOME/tbuild/src"
+          {
+            echo "WORK=$HOME/tbuild"
+            echo "OUT=$HOME/tbuild/out"
+            echo "THEOS=$HOME/theos"
+          } >> "$GITHUB_ENV"
+
+      - name: Download project from Telegram
+        if: inputs.source_type == 'telegram'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          die() { echo "$*" | tee -a "$OUT/error.txt"; exit 1; }
+          api="https://api.telegram.org"
+          resp=$(curl -sS --retry 3 "$api/bot${TELEGRAM_BOT_TOKEN}/getFile" \
+                   --data-urlencode "file_id=${SOURCE}") || die "Could not reach Telegram."
+          fpath=$(printf '%s' "$resp" | jq -r '.result.file_path // empty')
+          if [ -z "$fpath" ]; then
+            reason=$(printf '%s' "$resp" | jq -r '.description // "unknown error"')
+            die "Telegram refused the file ($reason). Bots can only download files up to 20 MB; for bigger projects use /build with a git URL."
+          fi
+          curl -fsS --retry 3 -o "$WORK/source.zip" \
+            "$api/file/bot${TELEGRAM_BOT_TOKEN}/${fpath}" || die "Downloading the file from Telegram failed."
+          unzip -q "$WORK/source.zip" -d "$WORK/src" || die "That file is not a valid .zip archive."
+
+      - name: Clone project from git
+        if: inputs.source_type == 'git'
+        run: |
+          die() { echo "$*" | tee -a "$OUT/error.txt"; exit 1; }
+          case "$SOURCE" in
+            https://*) ;;
+            *) die "Only https:// git URLs are supported." ;;
+          esac
+          case "$SOURCE" in
+            *[[:space:]]*) die "That git URL is not valid." ;;
+          esac
+          args=(--depth=1 --recurse-submodules)
+          if [ -n "$BRANCH" ]; then args+=(--branch "$BRANCH"); fi
+          GIT_TERMINAL_PROMPT=0 git clone "${args[@]}" -- "$SOURCE" "$WORK/src" \
+            || die "git clone failed. Check the URL and branch (private repos are not supported)."
+
+      - name: Locate the Theos project
+        run: |
+          die() { echo "$*" | tee -a "$OUT/error.txt"; exit 1; }
+          # Use the Makefile closest to the top of the archive/repo.
+          mk=$(find "$WORK/src" -type f -name Makefile \
+                 -not -path '*/.theos/*' -not -path '*/__MACOSX/*' -not -path '*/.git/*' \
+               | awk -F/ 'NR==1 || NF<min {min=NF; best=$0} END {print best}')
+          [ -n "$mk" ] || die "No Makefile found. Zip the project folder that contains the Makefile."
+          grep -qi 'theos' "$mk" || die "That Makefile doesn't look like a Theos project (no \$(THEOS)/makefiles/common.mk)."
+          echo "Project directory: $(dirname "$mk")"
+          echo "PROJECT=$(dirname "$mk")" >> "$GITHUB_ENV"
+
+      - name: Install Theos
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_ENV_HINTS=1
+          # GNU make 4 (macOS ships 3.81), ldid for signing, xz for packaging
+          brew install make ldid xz
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+
+          git clone --recursive --jobs 8 https://github.com/theos/theos.git "$THEOS"
+
+          # Extra iOS SDKs so TARGET = iphone:clang:latest:<old version> works too.
+          mkdir -p "$THEOS/sdks"
+          if git clone --depth=1 https://github.com/theos/sdks.git "$WORK/sdks"; then
+            cp -R "$WORK/sdks/"*.sdk "$THEOS/sdks/" || true
+          else
+            echo "::warning::Could not fetch theos/sdks, falling back to the Xcode SDK."
+          fi
+
+      - name: Build
+        run: |
+          cd "$PROJECT"
+          make --version | sed -n 1p
+
+          WANT_DEB=0; DEBUG=0; SCHEME=""
+          set -f
+          for o in $OPTIONS; do
+            case "$o" in
+              deb) WANT_DEB=1 ;;
+              debug) DEBUG=1 ;;
+              rootless) SCHEME=rootless ;;
+              *) echo "Ignoring unknown option: $o" ;;
+            esac
+          done
+          set +f
+
+          args=()
+          if [ "$DEBUG" = 0 ]; then args+=(FINALPACKAGE=1); fi
+          if [ -n "$SCHEME" ]; then args+=("THEOS_PACKAGE_SCHEME=$SCHEME"); fi
+
+          # "make package" stages the signed files exactly as they get installed.
+          target=all
+          if [ -f control ] || [ -f layout/DEBIAN/control ]; then target=package; fi
+
+          rm -rf .theos packages
+          set +e
+          make "$target" "${args[@]}" 2>&1 | tee "$OUT/build.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "Compilation failed (make exit code $rc)." >> "$OUT/error.txt"
+            exit "$rc"
+          fi
+
+          mkdir -p "$OUT/files" "$OUT/debs"
+          if [ -d .theos/_ ]; then
+            find .theos/_ -type f -name '*.dylib' -exec cp {} "$OUT/files/" \;
+          fi
+          if [ -z "$(ls -A "$OUT/files")" ]; then
+            find .theos/obj -maxdepth 2 -type f -name '*.dylib' ! -path '*/arm*/*' -exec cp {} "$OUT/files/" \; 2>/dev/null || true
+          fi
+          if [ "$WANT_DEB" = 1 ] || [ -z "$(ls -A "$OUT/files")" ]; then
+            find packages -maxdepth 1 -type f -name '*.deb' -exec cp {} "$OUT/debs/" \; 2>/dev/null || true
+          fi
+          if [ -z "$(ls -A "$OUT/files")" ] && [ -z "$(ls -A "$OUT/debs")" ]; then
+            echo "The build finished but produced no .dylib. Is this a tweak/library project?" >> "$OUT/error.txt"
+            exit 1
+          fi
+          echo "Collected:"; ls -lh "$OUT/files" "$OUT/debs"
+
+      - name: Send result to Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          JOB_STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          OUT="${OUT:-$HOME/tbuild/out}"
+          api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+          label="${FILE_NAME:-$SOURCE}"
+
+          reply=()
+          if [ -n "$REPLY_TO" ]; then
+            reply=(--form-string "reply_to_message_id=$REPLY_TO" --form-string "allow_sending_without_reply=true")
+          fi
+
+          # clip TEXT MAXCHARS: shorten and drop any half-cut UTF-8 character
+          clip() { printf '%s' "${1:0:$2}" | iconv -c -f UTF-8 -t UTF-8; }
+
+          send_msg() {
+            curl -sS --retry 3 "$api/sendMessage" \
+              --form-string "chat_id=$CHAT_ID" \
+              --form-string "text=$(clip "$1" 3500)" \
+              "${reply[@]}" -o /dev/null
+          }
+
+          send_doc() {
+            local res
+            res=$(curl -sS --retry 3 "$api/sendDocument" \
+                    --form-string "chat_id=$CHAT_ID" \
+                    -F "document=@$1" \
+                    --form-string "caption=$(clip "$2" 950)" \
+                    "${reply[@]}") || return 1
+            if [ "$(printf '%s' "$res" | jq -r '.ok')" != "true" ]; then
+              echo "::warning::Telegram rejected $(basename "$1"): $(printf '%s' "$res" | jq -r '.description')"
+              return 1
+            fi
+          }
+
+          have_files() { [ -n "$(ls -A "$OUT/files" 2>/dev/null)" ] || [ -n "$(ls -A "$OUT/debs" 2>/dev/null)" ]; }
+
+          if [ "$JOB_STATUS" = "success" ] && have_files; then
+            for f in "$OUT"/files/*; do
+              [ -f "$f" ] || continue
+              name=$(basename "$f")
+              archs=$(lipo -archs "$f" 2>/dev/null || echo unknown)
+              size=$(du -h "$f" | awk '{print $1}')
+              send_doc "$f" "$(printf '✅ %s\nProject: %s\nArchitectures: %s\nSize: %s' "$name" "$label" "$archs" "$size")" \
+                || send_msg "⚠️ Built $name but Telegram would not accept the upload. See the run: $RUN_URL"
+            done
+            for f in "$OUT"/debs/*; do
+              [ -f "$f" ] || continue
+              send_doc "$f" "📦 $(basename "$f")" \
+                || send_msg "⚠️ Built $(basename "$f") but Telegram would not accept the upload. See the run: $RUN_URL"
+            done
+          else
+            if [ "$JOB_STATUS" = "cancelled" ]; then title="⛔ Build cancelled"; else title="❌ Build failed"; fi
+            reason="The runner failed before compiling (setup step). Open the run for details."
+            if [ -f "$OUT/error.txt" ]; then reason=$(sed -n 1p "$OUT/error.txt"); fi
+            if [ -f "$OUT/build.log" ]; then
+              tail_txt=$(tail -n 15 "$OUT/build.log")
+              send_doc "$OUT/build.log" "$(printf '%s: %s\n%s\n\n%s\n\nRun: %s' "$title" "$label" "$reason" "$tail_txt" "$RUN_URL")" \
+                || send_msg "$(printf '%s: %s\n%s\n\nRun: %s' "$title" "$label" "$reason" "$RUN_URL")"
+            else
+              send_msg "$(printf '%s: %s\n%s\n\nRun: %s' "$title" "$label" "$reason" "$RUN_URL")"
+            fi
+          fi
