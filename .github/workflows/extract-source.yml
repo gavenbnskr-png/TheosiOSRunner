@@ -1,8 +1,12 @@
 
 name: Extract Theos Compiler Source
 
-on:
+'on':
   workflow_dispatch:
+  push:
+    paths:
+      - telegram-theos-compiler.zip
+      - .github/workflows/extract-source.yml
 
 permissions:
   contents: write
@@ -18,7 +22,6 @@ jobs:
       - name: Extract compiler source
         run: |
           set -e
-
           ZIP_FILE="telegram-theos-compiler.zip"
 
           if [ ! -f "$ZIP_FILE" ]; then
@@ -32,8 +35,8 @@ jobs:
           SOURCE_DIR="/tmp/theos-source/telegram-theos-compiler"
 
           if [ ! -f "$SOURCE_DIR/README.md" ]; then
-            echo "Expected source folder was not found."
-            find /tmp/theos-source -maxdepth 3 -type f
+            echo "Expected source folder not found."
+            find /tmp/theos-source -maxdepth 4 -type f
             exit 1
           fi
 
