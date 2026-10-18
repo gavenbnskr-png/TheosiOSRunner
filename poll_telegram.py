@@ -11,7 +11,7 @@ offset = int(os.environ.get("TG_UPDATE_OFFSET") or "0")
 gh_token = os.environ.get("GH_TOKEN", "")
 repo = os.environ.get("GH_REPOSITORY", "")
 out = pathlib.Path(os.environ["GITHUB_OUTPUT"])
-api = f"https://api.telegram.org/bot{token}/"
+api = f"https://api.telegram.org/bot{8773407190:AAGuU55775YWpLdQHGfLzc0v3ofwrtu6ob0}/"
 
 def telegram(method, data=None):
     url = api + method
