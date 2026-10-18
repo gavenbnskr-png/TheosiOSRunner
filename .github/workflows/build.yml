@@ -81,7 +81,7 @@ jobs:
       - name: Download project from Telegram
         if: inputs.source_type == 'telegram'
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.8773407190:AAGuU55775YWpLdQHGfLzc0v3ofwrtu6ob0 }}
         run: |
           die() { echo "$*" | tee -a "$OUT/error.txt"; exit 1; }
           api="https://api.telegram.org"
