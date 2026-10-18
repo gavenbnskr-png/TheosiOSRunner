@@ -3,10 +3,6 @@ name: Extract Theos Compiler Source
 
 'on':
   workflow_dispatch:
-  push:
-    paths:
-      - telegram-theos-compiler.zip
-      - .github/workflows/extract-source.yml
 
 permissions:
   contents: write
@@ -14,48 +10,30 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Extract compiler source
+      - name: Extract ZIP
         run: |
           set -e
-          ZIP_FILE="telegram-theos-compiler.zip"
+          mkdir -p /tmp/source
+          unzip -q telegram-theos-compiler.zip -d /tmp/source
+          SOURCE="/tmp/source/telegram-theos-compiler"
+          test -f "$SOURCE/README.md"
+          cp -R "$SOURCE/." .
+          mkdir -p /tmp/theos-files
+          cp -R scripts README.md /tmp/theos-files/
+          mkdir -p extracted-compiler
+          cp -R /tmp/theos-files/. extracted-compiler/
+          rm -rf scripts
+          rm -f README.md
 
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "Compiler ZIP not found at repository root."
-            exit 1
-          fi
-
-          mkdir -p /tmp/theos-source
-          unzip -q "$ZIP_FILE" -d /tmp/theos-source
-
-          SOURCE_DIR="/tmp/theos-source/telegram-theos-compiler"
-
-          if [ ! -f "$SOURCE_DIR/README.md" ]; then
-            echo "Expected source folder not found."
-            find /tmp/theos-source -maxdepth 4 -type f
-            exit 1
-          fi
-
-          cp -R "$SOURCE_DIR/." .
-
-          test -f scripts/poll_telegram.py
-          test -f scripts/build_theos.sh
-          test -f .github/workflows/telegram-theos.yml
-
-      - name: Commit extracted source
+      - name: Commit extracted files
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add README.md scripts .github/workflows/telegram-theos.yml
-
-          if git diff --cached --quiet; then
-            echo "No source changes to commit."
-          else
-            git commit -m "Add Telegram Theos compiler source"
+          git add extracted-compiler
+          if ! git diff --cached --quiet; then
+            git commit -m "Add extracted compiler source"
             git push
           fi
